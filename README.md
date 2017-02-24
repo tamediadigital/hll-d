@@ -1,6 +1,7 @@
 # Complete Generic [HyperLogLog++](https://research.google.com/pubs/pub40671.html) Implementation
 
 ```d
+import hll;
 import std.experimental.allocator;
 import std.experimental.allocator.mallocator;
 auto counter = HLL!(shared Mallocator)(Mallocator.instance);
