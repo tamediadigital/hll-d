@@ -11,6 +11,7 @@ import std.traits;
 import mir.ndslice.slice;
 import mir.ndslice.field: BitpackField;
 import mir.ndslice.iterator: FieldIterator;
+static import core.stdc.stdlib;
 
 static if (__VERSION__ >= 2072)
 {
@@ -40,167 +41,179 @@ Params:
 
 The structure is not copyable and has destructor.
 +/
-struct HLL(Allocator, uint p = 18, uint pPrime = 25)
+struct HLL
 {
-    static assert(4 <= p && p <= pPrime && p <= 18, "constraint: p ∈ [4..min(pPrime, 18)]");
-    static assert(pPrime <= 63, "constraint: pPrime ∈ [4..63]");
+    invariant
+    {
+        assert(4 <= p && p <= pPrime && p <= 18, "constraint: p ∈ [4..min(pPrime, 18)]");
+        assert(pPrime <= 63, "constraint: pPrime ∈ [4..63]");
+    }
 
     ///
     @disable this();
     ///
     @disable this(this);
 
-    private Allocator* _allocator;
-    private enum hasSparse = p > 10;
+    extern(C) @system nothrow @nogc
+    {
+        void* function(size_t size) malloc;
+        void* function(void* ptr, size_t size) realloc;
+        void  function(void* ptr) free;
+    }
 
-    ///
-    ref allocator()() @property { return *_allocator; }
+    uint p;// = 18;
+    uint pPrime; // = 25;
 
     private ulong* _normal;
-    private static if (hasSparse)
+    private ubyte[] _sparse;
+    private size_t _sparse_count;
+    private ulong[] _temp;
+    size_t _temp_length;
+
+    ulong[] temp()
     {
-        private ubyte[] _sparse;
-        private size_t _sparse_count;
-        private ulong[] _temp;
-        size_t _temp_length;
+        return _temp[0 .. _temp_length];
+    }
 
-        ulong[] temp()
+    private void putTemp(ulong x)
+    {
+        assert(_temp_length <= _temp.length);
+        if (_temp_length == _temp.length)
         {
-            return _temp[0 .. _temp_length];
-        }
-
-        private void putTemp(ulong x)
-        {
-            assert(_temp_length <= _temp.length);
-            if (_temp_length == _temp.length)
-            {
-                auto d = cast(void[])_temp;
-                auto r = allocator.reallocate(d, d.length * 2);
-                assert(r);
-                _temp = (cast(ulong*)d.ptr)[0 .. _temp.length * 2];
-            }
-            _temp[_temp_length++] = x;
-        }
-
-        void uniteTemp()
-        {
-            if (temp.length == 0)
-                return;
-            import mir.ndslice.sorting: sort;
-            temp.sliced.sort!((a, b) => cmp!(p, pPrime)(a, b) < 0);
-            auto new_sparse = allocator.allocate(_sparse.length + temp.length * 10 + 10);
-            auto o = OutputSparse(cast(ubyte*)new_sparse.ptr, new_sparse.length, 0, 0);
-            if (_sparse.length)
-            {
-                merge!(p, pPrime)(inputSparse, temp.sliced, o);
-            }
-            else
-            {
-                foreach(e; temp)
-                    o.put(e);
-            }
-            assert(o.length);
-            auto r = allocator.reallocate(new_sparse, o.length);
+            auto d = cast(void[])_temp;
+            assert(d.ptr);
+            auto r = realloc(d.ptr, d.length * 2);
             assert(r);
-            if (_sparse.length)
-                allocator.deallocate(_sparse);
-            _sparse = cast(ubyte[])new_sparse[0 .. o.length];
-            assert(_sparse.length);
-            _sparse_count = o.count;
-            _temp_length = 0;
+            _temp = (cast(ulong*)r)[0 .. _temp.length * 2];
         }
+        _temp[_temp_length++] = x;
+    }
 
-        void deallocateSparse()
-        {
-            if (_temp)
-            {
-                allocator.deallocate(_temp);
-                _temp = null;
-            }
-            if (_sparse)
-            {
-                allocator.deallocate(_sparse);
-                _sparse = null;
-            }
-        }
+    void uniteTemp()
+    {
+        if (temp.length == 0)
+            return;
+        //import mir.ndslice.sorting: sort;
+        import std.algorithm;
+        temp.sort!((a, b) => cmp(a, b) < 0);
+        auto new_sparse_length = _sparse.length + temp.length * 10 + 10;
+        auto new_sparse = malloc(new_sparse_length);
 
-        InputSparse inputSparse()
+        auto o = OutputSparse(cast(ubyte*)new_sparse, new_sparse_length, 0, 0, 0);
+        if (_sparse.length)
         {
-            if (_sparse.ptr)
-                return InputSparse(_sparse.ptr, _sparse_count);
-            return InputSparse.init;
+            merge(inputSparse, temp.sliced, o);
         }
+        else
+        {
+            foreach(e; temp)
+                o.put(e);
+        }
+        assert(o.length);
+
+        auto r = realloc(new_sparse, o.length);
+        assert(r);
+        if (_sparse.length)
+            free(_sparse.ptr);
+        _sparse = cast(ubyte[])r[0 .. o.length];
+        assert(_sparse.length);
+        _sparse_count = o.count;
+        _temp_length = 0;
+    }
+
+    void deallocateSparse()
+    {
+        if (_temp.ptr)
+        {
+            free(_temp.ptr);
+            _temp = null;
+        }
+        if (_sparse.ptr)
+        {
+            free(_sparse.ptr);
+            _sparse = null;
+        }
+    }
+
+    InputSparse inputSparse()
+    {
+        if (_sparse.ptr)
+            return InputSparse(_sparse.ptr, _sparse_count);
+        return InputSparse(null, 0);
     }
 
     private auto normal()
     {
         import mir.ndslice.topology: bitpack;
-        return _normal[0 .. normal_length!p].sliced.bitpack!6;
+        return _normal[0 .. normal_length(p)].sliced.bitpack!6;
     }
 
     ///
-    this(ref Allocator allocator)
+    this(uint p,
+        uint pPrime = 25, 
+        typeof(this.malloc) malloc = &core.stdc.stdlib.malloc,
+        typeof(this.realloc) realloc = &core.stdc.stdlib.realloc,
+        typeof(this.free) free = &core.stdc.stdlib.free,
+        )
     {
-        static if (hasSparse)
+        this.p = p;
+        this.pPrime = pPrime;
+        this.malloc = malloc;
+        this.realloc = realloc;
+        this.free = free;
+        if (this.pPrime)
         {
-            _temp = (cast(ulong*)allocator.allocate(24 * ulong.sizeof).ptr)[0 .. 24];
+            _temp = (cast(ulong*)this.malloc(24 * ulong.sizeof))[0 .. 24];
         }
         else
         {
-            _normal = cast(ulong*)allocator.allocate(normal_allocation_size!p);
-            foreach(ref e; _normal[0 .. normal_length!p])
+            _normal = cast(ulong*)malloc(normal_allocation_size(this.p));
+            foreach(ref e; _normal[0 .. normal_length(this.p)])
                 e = 0;
         }
-        _allocator = &allocator;
     }
 
     ///
     ~this()
     {
-        static if (hasSparse)
-        {
-            deallocateSparse();
-        }
+        deallocateSparse();
         if (_normal)
         {
-            allocator.deallocate(_normal[0 .. normal_length!p]);
+            free(_normal);
         }
     }
 
     /++
     Puts hash value to the counter.
     +/
-    void put()(ulong x)
+    void put(ulong x)
     {
-        static if (hasSparse)
+        if (_temp) //temp is always allocated for sparse representation
         {
-            if (_temp) //temp is always allocated for sparse representation
+                putTemp(encodeHash(x));
+                ulong r;
+                ulong idx = decodeHash(encodeHash(x), r);
+            if (temp.length >= normal_length(p) / 4)
             {
-                    putTemp(x.encodeHash!(p, pPrime));
-                    ulong r;
-                    ulong idx = decodeHash!(p, pPrime)(x.encodeHash!(p, pPrime), r);
-                if (temp.length >= normal_length!p / 4)
+                static uint i;
+                uniteTemp;
+                assert(_sparse.length);
+                if ((cast(void[])_sparse).length + (cast(void[])_temp).length >= normal_allocation_size(p))
                 {
-                    static uint i;
-                    uniteTemp;
-                    assert(_sparse.length);
-                    if ((cast(void[])_sparse).length + (cast(void[])_temp).length >= normal_allocation_size!p)
-                    {
-                        _normal = allocator.toNormal!(p, pPrime)(inputSparse);
-                        deallocateSparse;
-                    }
+                    _normal = toNormal(inputSparse);
+                    deallocateSparse;
                 }
-                return;
             }
+            return;
         }
         // normal representation
         auto bp = normal;
-        enum shift = 64 - p;
+        auto shift = 64 - p;
         size_t idx = cast(size_t) (x >> shift);
         assert(idx < bp.length);
-        ulong r = rho!p(x);
+        ulong r = rho(x);
         ulong r1;
-        auto idx1 = decodeHash!(p, pPrime)(x.encodeHash!(p, pPrime), r1);
+        auto idx1 = decodeHash(encodeHash(x), r1);
         idx1 >>= pPrime - p;
         assert(idx1 == idx);
         assert(r1 == r);
@@ -214,7 +227,7 @@ struct HLL(Allocator, uint p = 18, uint pPrime = 25)
     Puts uuid's hash value to the counter.
     Note: for 64bit targets only.
     +/
-    void put()(UUID uuid)
+    void put(UUID uuid)
     {
         put(uuid.toHash);
     }
@@ -241,15 +254,12 @@ struct HLL(Allocator, uint p = 18, uint pPrime = 25)
     /++
     Returns: estimated cardinality number.
     +/
-    ulong count()()
+    ulong count()
     {
-        static if (hasSparse)
+        if (_temp)
         {
-            if (_temp)
-            {
-                uniteTemp;
-                return cast(ulong) linearCounting(m!pPrime, m!pPrime - _sparse_count);
-            }
+            uniteTemp;
+            return cast(ulong) linearCounting(m(pPrime), m(pPrime) - _sparse_count);
         }
         import mir.math.internal: pow;
         ulong overflows;
@@ -265,66 +275,115 @@ struct HLL(Allocator, uint p = 18, uint pPrime = 25)
                 overflows++;
             value += e;
         }
-        double e = alpha!p * pow(2.0, 2 * int(p) + 63) / (overflows * pow(2.0, 64) + value);
-        double ePrime = e <= 5 * m!p ? e - estimateBias!p(e) : e;
-        double h = v ? linearCounting(m!p, v) : ePrime;
-        return cast(ulong)(h <= threshold!p ? h : ePrime);
+        double e = alpha * pow(2.0, 2 * int(p) + 63) / (overflows * pow(2.0, 64) + value);
+        double ePrime = e <= 5 * m(p) ? e - estimateBias(e) : e;
+        double h = v ? linearCounting(m(p), v) : ePrime;
+        return cast(ulong)(h <= threshold ? h : ePrime);
     }
-}
 
-///
-unittest
-{
-    import std.experimental.allocator;
-    import std.experimental.allocator.mallocator;
-    import mir.random;
-    auto hll = HLL!(shared Mallocator)(Mallocator.instance);
-    enum c = 100_000;
-    auto rng = Random(unpredictableSeed);        // Engines are allocated on stack or global
-    foreach(_; 0 .. c)
-        hll.put(rng.rand!ulong);
-    puts("HLL++ test: counted ", hll.count, " unique values from ", c, " random values.");
-}
 
-private:
+    private:
 
-long cmp(uint p, uint pPrime)(ulong a, ulong b)
-{
-    ulong r1; 
-    ulong r2;
-    ulong d1 = decodeHash!(p, pPrime)(a, r1);
-    ulong d2 = decodeHash!(p, pPrime)(b, r2);
-    if(long d = d1 - d2)
-        return d;
-    return r1 - r2;
-}
 
-void merge(uint p, uint pPrime, I1, I2, O)(I1 i1, I2 i2, ref O o)
-{
-    if (!i1.empty && !i1.empty)
-    for(;;)
+    ulong* toNormal(InputSparse from)
     {
-        ulong f1 = i1.front;
-        ulong f2 = i2.front;
+        import mir.ndslice.topology: bitpack;
+        auto ret = cast(ulong*)malloc(normal_allocation_size(p));
+        foreach(ref e; ret[0 .. normal_length(p)])
+            e = 0;
+        auto bp = ret[0 .. normal_length(p)].sliced.bitpack!6;
+        assert(bp.length == m(p));
+        while(!from.empty)
+        {
+            auto e = from.front;
+            ulong r;
+            ulong idx = decodeHash(e, r);
+            idx >>= pPrime - p;
+            assert(idx < bp.length);
+            if (r > bp[idx])
+                bp[idx] = r;
+            from.popFront;
+        }
+        return ret;
+    }
+
+    long cmp(ulong a, ulong b)
+    {
         ulong r1; 
         ulong r2;
-        ulong d1 = decodeHash!(p, pPrime)(f1, r1);
-        ulong d2 = decodeHash!(p, pPrime)(f2, r2);
-        if (d1 < d2)
+        ulong d1 = decodeHash(a, r1);
+        ulong d2 = decodeHash(b, r2);
+        if(long d = d1 - d2)
+            return d;
+        return r1 - r2;
+    }
+
+    void merge(I1, I2, O)(I1 i1, I2 i2, ref O o)
+    {
+        if (!i1.empty && !i1.empty)
+        for(;;)
         {
-            o.put(f1);
-            i1.popFront;
-            if(i1.empty)
-                break;
+            ulong f1 = i1.front;
+            ulong f2 = i2.front;
+            ulong r1; 
+            ulong r2;
+            ulong d1 = decodeHash(f1, r1);
+            ulong d2 = decodeHash(f2, r2);
+            if (d1 < d2)
+            {
+                o.put(f1);
+                i1.popFront;
+                if(i1.empty)
+                    break;
+            }
+            else
+            {
+                i2.popFront;
+                while(!i2.empty)
+                {
+                    ulong f3 = i2.front;
+                    ulong r3;
+                    ulong d3 = decodeHash(f3, r3);
+                    if (d3 != d2)
+                    {
+                        assert(d3 > d2);
+                        break;
+                    }
+                    assert(r3 >= r2);
+                    r2 = r3;
+                    f2 = f3;
+                    i2.popFront;
+                }
+                if (d1 > d2)
+                {
+                    o.put(f2);
+                    //i2.popFront;
+                    if(i2.empty)
+                        break;
+                }
+                else
+                {
+                    o.put(r1 > r2 ? f1 : f2);
+                    i1.popFront;
+                    //i2.popFront;
+                    if(i1.empty || i2.empty)
+                        break;
+                }
+            }
         }
-        else
+        foreach (e; i1)
+            o.put(e);
+        if (!i2.empty)
         {
+            ulong r2;
+            ulong f2 = i2.front;
+            ulong d2 = decodeHash(f2, r2);
             i2.popFront;
             while(!i2.empty)
             {
                 ulong f3 = i2.front;
                 ulong r3;
-                ulong d3 = decodeHash!(p, pPrime)(f3, r3);
+                ulong d3 = decodeHash(f3, r2);
                 if (d3 != d2)
                 {
                     assert(d3 > d2);
@@ -335,137 +394,114 @@ void merge(uint p, uint pPrime, I1, I2, O)(I1 i1, I2 i2, ref O o)
                 f2 = f3;
                 i2.popFront;
             }
-            if (d1 > d2)
-            {
-                o.put(f2);
-                //i2.popFront;
-                if(i2.empty)
-                    break;
-            }
-            else
-            {
-                o.put(r1 > r2 ? f1 : f2);
-                i1.popFront;
-                //i2.popFront;
-                if(i1.empty || i2.empty)
-                    break;
-            }
+            o.put(f2);
         }
     }
-    foreach (e; i1)
-        o.put(e);
-    if (!i2.empty)
+
+    ulong rho(ulong x)
     {
-        ulong r2;
-        ulong f2 = i2.front;
-        ulong d2 = decodeHash!(p, pPrime)(f2, r2);
-        i2.popFront;
-        while(!i2.empty)
+        x <<= p;
+        x ^= 1UL << (p - 1);
+        version(LDC)
         {
-            ulong f3 = i2.front;
-            ulong r3;
-            ulong d3 = decodeHash!(p, pPrime)(f3, r2);
-            if (d3 != d2)
-            {
-                assert(d3 > d2);
-                break;
-            }
-            assert(r3 >= r2);
-            r2 = r3;
-            f2 = f3;
-            i2.popFront;
+            import ldc.intrinsics: llvm_ctlz;
+            x = llvm_ctlz(x, true) + 1;
         }
-        o.put(f2);
+        else
+        {
+            import core.bitop;
+            x = 64 - bsr(x);
+        }
+        assert(x < 64);
+        assert(x <= 65 - p);
+        return x;
     }
-}
 
-ulong rho(uint p)(ulong x)
-{
-    x <<= p;
-    x ^= 1UL << (p - 1);
-    version(LDC)
+    ulong encodeHash(ulong x)
     {
-        import ldc.intrinsics: llvm_ctlz;
-        x = llvm_ctlz(x, true) + 1;
+        ulong a = x >> (64 - pPrime);
+        auto r = rho(x);
+        assert(r <= 65 - p);
+        a <<= 1;
+        return (r <= pPrime - p) ? a : ((a << 6) | (r << 1) | 1);
     }
-    else
+
+    ulong decodeHash(ulong k, ref ulong r)
     {
-        import core.bitop;
-        x = 64 - bsr(x);
+        auto c = k & 1;
+        k >>= 1;
+        //mask = m(pPrime) - 1;
+        if (c == 0)
+        {
+            r = rho(k << (64 - pPrime));
+        }
+        else
+        {
+            auto m = (1UL << 6) - 1;
+            r = k & m;
+            assert(r < 64);
+            k >>= 6;
+        }
+        //k >>= pPrime - p;
+        //k &= mask;
+        assert(k < m(pPrime));
+        return k;
     }
-    assert(x < 64);
-    assert(x <= 65 - p);
-    return x;
-}
 
-ulong encodeHash(uint p, uint pPrime)(ulong x)
-{
-    ulong a = x >> (64 - pPrime);
-    auto r = rho!p(x);
-    assert(r <= 65 - p);
-    a <<= 1;
-    return (r <= pPrime - p) ? a : ((a << 6) | (r << 1) | 1);
-}
-
-ulong decodeHash(uint p, uint pPrime)(ulong k, ref ulong r)
-{
-    auto c = k & 1;
-    k >>= 1;
-    enum mask = m!pPrime - 1;
-    if (c == 0)
+    // for p-4
+    auto threshold()
     {
-        r = rho!p(k << (64 - pPrime));
+        return _threshold[p - 4];
     }
-    else
+
+    double estimateBias(double e)
     {
-        enum m = (1UL << 6) - 1;
-        r = k & m;
-        assert(r < 64);
-        k >>= 6;
+        immutable double[] raw = _rawEstimateData[p - 4];
+        immutable double[] data = _biasData[p - 4];
+        import std.range;
+        auto t = raw.assumeSorted.trisect(e);
+        if (t[1].length)
+            return data[t[0].length];
+        if (t[0].length == 0)
+            return data[0];
+        if (t[2].length == 0)
+            return data[$-1];
+        auto index = t[0].length;
+        auto w1 = raw[index] - e;
+        auto w2 = e - raw[index-1];
+        return (data[index] * w1 + data[index-1] * w2) / (w1 + w2);
     }
-    //k >>= pPrime - p;
-    //k &= mask;
-    import std.conv;
-    assert(k < m!pPrime, c.text);
-    return k;
+
+    double alpha()
+    {
+        switch(p)
+        {
+            case 4:
+                return 0.673;
+            case 5:
+                return  0.697;
+            case 6:
+                return 0.709;
+            default:
+                return 0.7213 / (1 + 1.079 / m(p));
+        }
+    }
 }
 
-// for p-4
-enum _threshold = [10, 20, 40, 80, 220, 400, 900, 1800, 3100, 6500, 11500, 20000, 50000, 120000, 350000];
-
-alias enum threshold(uint p) = _threshold[p - 4];
-
-double estimateBias(uint p)(double e)
+///
+unittest
 {
-    static immutable double[] raw = _rawEstimateData[p - 4];
-    static immutable double[] data = _biasData[p - 4];
-    import std.range;
-    auto t = raw.assumeSorted.trisect(e);
-    if (t[1].length)
-        return data[t[0].length];
-    if (t[0].length == 0)
-        return data[0];
-    if (t[2].length == 0)
-        return data[$-1];
-    auto index = t[0].length;
-    auto w1 = raw[index] - e;
-    auto w2 = e - raw[index-1];
-    return (data[index] * w1 + data[index-1] * w2) / (w1 + w2);
+    import std.experimental.allocator;
+    import std.experimental.allocator.mallocator;
+    import mir.random;
+    auto hll = HLL(18);
+    enum c = 100_000;
+    auto rng = Random(unpredictableSeed);        // Engines are allocated on stack or global
+    foreach(_; 0 .. c)
+        hll.put(rng.rand!ulong);
+    puts("HLL++ test: counted ", hll.count, " unique values from ", c, " random values.");
 }
 
-template alpha(uint p)
-{
-    static if (p == 4)
-        enum double alpha = 0.673;
-    else
-    static if (p == 5)
-        enum double alpha =  0.697;
-    else
-    static if (p == 6)
-        enum double alpha = 0.709;
-    else
-        enum double alpha = 0.7213 / (1 + 1.079 / m!p);
-}
 
 auto linearCounting(ulong m, ulong v)
 {
@@ -483,15 +519,15 @@ struct InputSparse
     {
         this.data = data;
         this.length = length;
-        this.front = fromVarint(this.data);
+        this.front = length ? fromVarint(this.data) : 0;
     }
 
-    bool empty()() @property
+    bool empty() @property
     {
         return length == 0;
     }
 
-    void popFront()()
+    void popFront()
     {
         if (length--)
         {
@@ -515,7 +551,6 @@ struct OutputSparse
         lastValue = value;
         auto d = data;
         toVarint(data, diff);
-        //toVarint(data, value);
         length += data - d;
         assert(data - d <= 10);
         count++;
@@ -539,7 +574,7 @@ unittest
     assert(InputSparse(d.ptr, o.count).equal(ar));
 }
 
-ulong fromVaruint()(ref const(ubyte)* d)
+ulong fromVaruint(ref const(ubyte)* d)
 {
     auto data = d;
     ulong ret;
@@ -557,7 +592,7 @@ ulong fromVaruint()(ref const(ubyte)* d)
     return ret;
 }
 
-long fromVarint()(ref const(ubyte)* d)
+long fromVarint(ref const(ubyte)* d)
 {
     auto ux = fromVaruint(d);
     auto x = ux >> 1;
@@ -566,7 +601,7 @@ long fromVarint()(ref const(ubyte)* d)
     return x;
 }
 
-size_t varintLength()(ulong n)
+size_t varintLength(ulong n)
 {
     if (n <= 127)
         return 1;
@@ -580,7 +615,7 @@ size_t varintLength()(ulong n)
     }
 }
 
-void toVaruint()(ref ubyte* d, ulong n)
+void toVaruint(ref ubyte* d, ulong n)
 {
     auto data = d;
     while (n > byte.max)
@@ -592,7 +627,7 @@ void toVaruint()(ref ubyte* d, ulong n)
     d = data;
 }
 
-void toVarint()(ref ubyte* d, long n)
+void toVarint(ref ubyte* d, long n)
 {
     toVaruint(d, (n << 1) ^ (n >> 63));
 }
@@ -623,35 +658,15 @@ unittest
     assert(p == variant.ptr + 2);
 }
 
-enum size_t m(uint p) = ulong(1) << p;
-enum size_t normal_bit_size(uint p) = m!p * 6;
-enum size_t normal_size(uint p) = normal_bit_size!p / 8;
-enum size_t normal_length(uint p) = normal_size!p / ulong.sizeof + (normal_size!p % ulong.sizeof != 0);
-enum size_t normal_allocation_size(uint p) = normal_length!p * ulong.sizeof;
+size_t m(uint p) { return size_t(1) << p; }
+size_t normal_bit_size(uint p) { return m(p) * 6; }
+size_t normal_size(uint p) { return normal_bit_size(p) / 8; }
+size_t normal_length(uint p) { return normal_size(p) / ulong.sizeof + (normal_size(p) % ulong.sizeof != 0); }
+size_t normal_allocation_size(uint p) { return normal_length(p) * ulong.sizeof; }
 
-ulong* toNormal(uint p, uint pPrime, Allocator)(auto ref Allocator allocator, InputSparse from)
-{
-    import mir.ndslice.topology: bitpack;
-    auto ret = cast(ulong*)allocator.allocate(normal_allocation_size!p);
-    foreach(ref e; ret[0 .. normal_length!p])
-        e = 0;
-    auto bp = ret[0 .. normal_length!p].sliced.bitpack!6;
-    assert(bp.length == m!p);
-    while(!from.empty)
-    {
-        auto e = from.front;
-        ulong r;
-        ulong idx = decodeHash!(p, pPrime)(e, r);
-        idx >>= pPrime - p;
-        assert(idx < bp.length);
-        if (r > bp[idx])
-            bp[idx] = r;
-        from.popFront;
-    }
-    return ret;
-}
+immutable _threshold = [10, 20, 40, 80, 220, 400, 900, 1800, 3100, 6500, 11500, 20000, 50000, 120000, 350000];
 
-enum immutable(double)[][] _rawEstimateData = [
+immutable immutable(double)[][] _rawEstimateData = [
   [11, 11.717, 12.207, 12.7896, 13.2882, 13.8204, 14.3772, 14.9342, 15.5202, 16.161, 16.7722, 17.4636, 18.0396, 18.6766, 19.3566, 20.0454, 20.7936, 21.4856, 22.2666, 22.9946, 23.766, 24.4692, 25.3638, 26.0764, 26.7864, 27.7602, 28.4814, 29.433, 30.2926, 31.0664, 31.9996, 32.7956, 33.5366, 34.5894, 35.5738, 36.2698, 37.3682, 38.0544, 39.2342, 40.0108, 40.7966, 41.9298, 42.8704, 43.6358, 44.5194, 45.773, 46.6772, 47.6174, 48.4888, 49.3304, 50.2506, 51.4996, 52.3824, 53.3078, 54.3984, 55.5838, 56.6618, 57.2174, 58.3514, 59.0802, 60.1482, 61.0376, 62.3598, 62.8078, 63.9744, 64.914, 65.781, 67.1806, 68.0594, 68.8446, 69.7928, 70.8248, 71.8324, 72.8598, 73.6246, 74.7014, 75.393, 76.6708, 77.2394, ],
   [23, 23.1194, 23.8208, 24.2318, 24.77, 25.2436, 25.7774, 26.2848, 26.8224, 27.3742, 27.9336, 28.503, 29.0494, 29.6292, 30.2124, 30.798, 31.367, 31.9728, 32.5944, 33.217, 33.8438, 34.3696, 35.0956, 35.7044, 36.324, 37.0668, 37.6698, 38.3644, 39.049, 39.6918, 40.4146, 41.082, 41.687, 42.5398, 43.2462, 43.857, 44.6606, 45.4168, 46.1248, 46.9222, 47.6804, 48.447, 49.3454, 49.9594, 50.7636, 51.5776, 52.331, 53.19, 53.9676, 54.7564, 55.5314, 56.4442, 57.3708, 57.9774, 58.9624, 59.8796, 60.755, 61.472, 62.2076, 63.1024, 63.8908, 64.7338, 65.7728, 66.629, 67.413, 68.3266, 69.1524, 70.2642, 71.1806, 72.0566, 72.9192, 73.7598, 74.3516, 75.5802, 76.4386, 77.4916, 78.1524, 79.1892, 79.8414, 80.8798, 81.8376, 82.4698, 83.7656, 84.331, 85.5914, 86.6012, 87.7016, 88.5582, 89.3394, 90.3544, 91.4912, 92.308, 93.3552, 93.9746, 95.2052, 95.727, 97.1322, 98.3944, 98.7588, 100.242, 101.1914, 102.2538, 102.8776, 103.6292, 105.1932, 105.9152, 107.0868, 107.6728, 108.7144, 110.3114, 110.8716, 111.245, 112.7908, 113.7064, 114.636, 115.7464, 116.1788, 117.7464, 118.4896, 119.6166, 120.5082, 121.7798, 122.9028, 123.4426, 124.8854, 125.705, 126.4652, 128.3462, 128.3464, 130.0398, 131.0042, 131.0342, 132.4766, 133.511, 134.7252, 135.425, 136.5172, 138.0572, 138.6694, 139.3712, 140.8598, 141.4594, 142.554, 143.4006, 144.7374, 146.1634, 146.8994, 147.605, 147.9304, 149.1636, 150.2468, 151.5876, 152.2096, 153.7032, 154.7146, 155.807, 156.9228, 157.0372, 158.5852, ],
   [46, 46.1902, 47.271, 47.8358, 48.8142, 49.2854, 50.317, 51.354, 51.8924, 52.9436, 53.4596, 54.5262, 55.6248, 56.1574, 57.2822, 57.837, 58.9636, 60.074, 60.7042, 61.7976, 62.4772, 63.6564, 64.7942, 65.5004, 66.686, 67.291, 68.5672, 69.8556, 70.4982, 71.8204, 72.4252, 73.7744, 75.0786, 75.8344, 77.0294, 77.8098, 79.0794, 80.5732, 81.1878, 82.5648, 83.2902, 84.6784, 85.3352, 86.8946, 88.3712, 89.0852, 90.499, 91.2686, 92.6844, 94.2234, 94.9732, 96.3356, 97.2286, 98.7262, 100.3284, 101.1048, 102.5962, 103.3562, 105.1272, 106.4184, 107.4974, 109.0822, 109.856, 111.48, 113.2834, 114.0208, 115.637, 116.5174, 118.0576, 119.7476, 120.427, 122.1326, 123.2372, 125.2788, 126.6776, 127.7926, 129.1952, 129.9564, 131.6454, 133.87, 134.5428, 136.2, 137.0294, 138.6278, 139.6782, 141.792, 143.3516, 144.2832, 146.0394, 147.0748, 148.4912, 150.849, 151.696, 153.5404, 154.073, 156.3714, 157.7216, 158.7328, 160.4208, 161.4184, 163.9424, 165.2772, 166.411, 168.1308, 168.769, 170.9258, 172.6828, 173.7502, 175.706, 176.3886, 179.0186, 180.4518, 181.927, 183.4172, 184.4114, 186.033, 188.5124, 189.5564, 191.6008, 192.4172, 193.8044, 194.997, 197.4548, 198.8948, 200.2346, 202.3086, 203.1548, 204.8842, 206.6508, 206.6772, 209.7254, 210.4752, 212.7228, 214.6614, 215.1676, 217.793, 218.0006, 219.9052, 221.66, 223.5588, 225.1636, 225.6882, 227.7126, 229.4502, 231.1978, 232.9756, 233.1654, 236.727, 237.7474, 238.1974, 241.1346, 242.3048, 244.1948, 245.3134, 246.879, 249.1204, 249.853, 252.6792, 253.857, 254.4486, 257.2362, 257.9534, 260.0286, 260.5632, 262.663, 264.723, 265.7566, 267.1624, 267.2566, 270.62, 272.8216, 273.2166, 275.2056, 276.2202, 278.3726, 280.3344, 281.9284, 283.9728, 284.1924, 286.4872, 287.587, 289.807, 291.1206, 292.769, 294.8708, 296.665, 297.1182, 299.4012, 300.6352, 302.1354, 304.1756, 306.1606, 307.3462, 308.5214, 309.4134, 310.8352, 313.9684, 315.837, 316.7796, 318.9858, ],
@@ -669,7 +684,7 @@ enum immutable(double)[][] _rawEstimateData = [
   [189084, 192250.913, 195456.774, 198696.946, 201977.762, 205294.444, 208651.754, 212042.099, 215472.269, 218941.91, 222443.912, 225996.845, 229568.199, 233193.568, 236844.457, 240543.233, 244279.475, 248044.27, 251854.588, 255693.2, 259583.619, 263494.621, 267445.385, 271454.061, 275468.769, 279549.456, 283646.446, 287788.198, 291966.099, 296181.164, 300431.469, 304718.618, 309024.004, 313393.508, 317760.803, 322209.731, 326675.061, 331160.627, 335654.47, 340241.442, 344841.833, 349467.132, 354130.629, 358819.432, 363574.626, 368296.587, 373118.482, 377914.93, 382782.301, 387680.669, 392601.981, 397544.323, 402529.115, 407546.018, 412593.658, 417638.657, 422762.865, 427886.169, 433017.167, 438213.273, 443441.254, 448692.421, 453937.533, 459239.049, 464529.569, 469910.083, 475274.03, 480684.473, 486070.26, 491515.237, 496995.651, 502476.617, 507973.609, 513497.19, 519083.233, 524726.509, 530305.505, 535945.728, 541584.404, 547274.055, 552967.236, 558667.862, 564360.216, 570128.148, 575965.08, 581701.952, 587532.523, 593361.144, 599246.128, 605033.418, 610958.779, 616837.117, 622772.818, 628672.04, 634675.369, 640574.831, 646585.739, 652574.547, 658611.217, 664642.684, 670713.914, 676737.681, 682797.313, 688837.897, 694917.874, 701009.882, 707173.648, 713257.254, 719415.392, 725636.761, 731710.697, 737906.209, 744103.074, 750313.39, 756504.185, 762712.579, 768876.985, 775167.859, 781359, 787615.959, 793863.597, 800245.477, 806464.582, 812785.294, 819005.925, 825403.057, 831676.197, 837936.284, 844266.968, 850642.711, 856959.756, 863322.774, 869699.931, 876102.478, 882355.787, 888694.463, 895159.952, 901536.143, 907872.631, 914293.672, 920615.14, 927130.974, 933409.404, 939922.178, 946331.47, 952745.93, 959209.264, 965590.224, 972077.284, 978501.961, 984953.19, 991413.271, 997817.479, 1004222.658, 1010725.676, 1017177.138, 1023612.529, 1030098.236, 1036493.719, 1043112.207, 1049537.036, 1056008.096, 1062476.184, 1068942.337, 1075524.95, 1081932.864, 1088426.025, 1094776.005, 1101327.448, 1107901.673, 1114423.639, 1120884.602, 1127324.923, 1133794.24, 1140328.886, 1146849.376, 1153346.682, 1159836.502, 1166478.703, 1172953.304, 1179391.502, 1185950.982, 1192544.052, 1198913.41, 1205430.994, 1212015.525, 1218674.042, 1225121.683, 1231551.101, 1238126.379, 1244673.795, 1251260.649, 1257697.86, 1264320.983, 1270736.319, 1277274.694, 1283804.95, 1290211.514, 1296858.568, 1303455.691, ]
 ];
 
-enum immutable(double)[][] _biasData = [
+immutable immutable(double)[][] _biasData = [
   [10, 9.717, 9.207, 8.7896, 8.2882, 7.8204, 7.3772, 6.9342, 6.5202, 6.161, 5.7722, 5.4636, 5.0396, 4.6766, 4.3566, 4.0454, 3.7936, 3.4856, 3.2666, 2.9946, 2.766, 2.4692, 2.3638, 2.0764, 1.7864, 1.7602, 1.4814, 1.433, 1.2926, 1.0664, 0.999600000000001, 0.7956, 0.5366, 0.589399999999998, 0.573799999999999, 0.269799999999996, 0.368200000000002, 0.0544000000000011, 0.234200000000001, 0.0108000000000033, -0.203400000000002, -0.0701999999999998, -0.129600000000003, -0.364199999999997, -0.480600000000003, -0.226999999999997, -0.322800000000001, -0.382599999999996, -0.511200000000002, -0.669600000000003, -0.749400000000001, -0.500399999999999, -0.617600000000003, -0.6922, -0.601599999999998, -0.416200000000003, -0.338200000000001, -0.782600000000002, -0.648600000000002, -0.919800000000002, -0.851799999999997, -0.962400000000002, -0.6402, -1.1922, -1.0256, -1.086, -1.21899999999999, -0.819400000000002, -0.940600000000003, -1.1554, -1.2072, -1.1752, -1.16759999999999, -1.14019999999999, -1.3754, -1.29859999999999, -1.607, -1.3292, -1.7606, ],
   [22, 21.1194, 20.8208, 20.2318, 19.77, 19.2436, 18.7774, 18.2848, 17.8224, 17.3742, 16.9336, 16.503, 16.0494, 15.6292, 15.2124, 14.798, 14.367, 13.9728, 13.5944, 13.217, 12.8438, 12.3696, 12.0956, 11.7044, 11.324, 11.0668, 10.6698, 10.3644, 10.049, 9.6918, 9.4146, 9.082, 8.687, 8.5398, 8.2462, 7.857, 7.6606, 7.4168, 7.1248, 6.9222, 6.6804, 6.447, 6.3454, 5.9594, 5.7636, 5.5776, 5.331, 5.19, 4.9676, 4.7564, 4.5314, 4.4442, 4.3708, 3.9774, 3.9624, 3.8796, 3.755, 3.472, 3.2076, 3.1024, 2.8908, 2.7338, 2.7728, 2.629, 2.413, 2.3266, 2.1524, 2.2642, 2.1806, 2.0566, 1.9192, 1.7598, 1.3516, 1.5802, 1.43859999999999, 1.49160000000001, 1.1524, 1.1892, 0.841399999999993, 0.879800000000003, 0.837599999999995, 0.469800000000006, 0.765600000000006, 0.331000000000003, 0.591399999999993, 0.601200000000006, 0.701599999999999, 0.558199999999999, 0.339399999999998, 0.354399999999998, 0.491200000000006, 0.308000000000007, 0.355199999999996, -0.0254000000000048, 0.205200000000005, -0.272999999999996, 0.132199999999997, 0.394400000000005, -0.241200000000006, 0.242000000000004, 0.191400000000002, 0.253799999999998, -0.122399999999999, -0.370800000000003, 0.193200000000004, -0.0848000000000013, 0.0867999999999967, -0.327200000000005, -0.285600000000002, 0.311400000000006, -0.128399999999999, -0.754999999999995, -0.209199999999996, -0.293599999999998, -0.364000000000004, -0.253600000000006, -0.821200000000005, -0.253600000000006, -0.510400000000004, -0.383399999999995, -0.491799999999998, -0.220200000000006, -0.0972000000000008, -0.557400000000001, -0.114599999999996, -0.295000000000002, -0.534800000000004, 0.346399999999988, -0.65379999999999, 0.0398000000000138, 0.0341999999999985, -0.995800000000003, -0.523400000000009, -0.489000000000004, -0.274799999999999, -0.574999999999989, -0.482799999999997, 0.0571999999999946, -0.330600000000004, -0.628800000000012, -0.140199999999993, -0.540600000000012, -0.445999999999998, -0.599400000000003, -0.262599999999992, 0.163399999999996, -0.100599999999986, -0.39500000000001, -1.06960000000001, -0.836399999999998, -0.753199999999993, -0.412399999999991, -0.790400000000005, -0.29679999999999, -0.28540000000001, -0.193000000000012, -0.0772000000000048, -0.962799999999987, -0.414800000000014, ],
   [45, 44.1902, 43.271, 42.8358, 41.8142, 41.2854, 40.317, 39.354, 38.8924, 37.9436, 37.4596, 36.5262, 35.6248, 35.1574, 34.2822, 33.837, 32.9636, 32.074, 31.7042, 30.7976, 30.4772, 29.6564, 28.7942, 28.5004, 27.686, 27.291, 26.5672, 25.8556, 25.4982, 24.8204, 24.4252, 23.7744, 23.0786, 22.8344, 22.0294, 21.8098, 21.0794, 20.5732, 20.1878, 19.5648, 19.2902, 18.6784, 18.3352, 17.8946, 17.3712, 17.0852, 16.499, 16.2686, 15.6844, 15.2234, 14.9732, 14.3356, 14.2286, 13.7262, 13.3284, 13.1048, 12.5962, 12.3562, 12.1272, 11.4184, 11.4974, 11.0822, 10.856, 10.48, 10.2834, 10.0208, 9.637, 9.51739999999999, 9.05759999999999, 8.74760000000001, 8.42700000000001, 8.1326, 8.2372, 8.2788, 7.6776, 7.79259999999999, 7.1952, 6.9564, 6.6454, 6.87, 6.5428, 6.19999999999999, 6.02940000000001, 5.62780000000001, 5.6782, 5.792, 5.35159999999999, 5.28319999999999, 5.0394, 5.07480000000001, 4.49119999999999, 4.84899999999999, 4.696, 4.54040000000001, 4.07300000000001, 4.37139999999999, 3.7216, 3.7328, 3.42080000000001, 3.41839999999999, 3.94239999999999, 3.27719999999999, 3.411, 3.13079999999999, 2.76900000000001, 2.92580000000001, 2.68279999999999, 2.75020000000001, 2.70599999999999, 2.3886, 3.01859999999999, 2.45179999999999, 2.92699999999999, 2.41720000000001, 2.41139999999999, 2.03299999999999, 2.51240000000001, 2.5564, 2.60079999999999, 2.41720000000001, 1.80439999999999, 1.99700000000001, 2.45480000000001, 1.8948, 2.2346, 2.30860000000001, 2.15479999999999, 1.88419999999999, 1.6508, 0.677199999999999, 1.72540000000001, 1.4752, 1.72280000000001, 1.66139999999999, 1.16759999999999, 1.79300000000001, 1.00059999999999, 0.905200000000008, 0.659999999999997, 1.55879999999999, 1.1636, 0.688199999999995, 0.712600000000009, 0.450199999999995, 1.1978, 0.975599999999986, 0.165400000000005, 1.727, 1.19739999999999, -0.252600000000001, 1.13460000000001, 1.3048, 1.19479999999999, 0.313400000000001, 0.878999999999991, 1.12039999999999, 0.853000000000009, 1.67920000000001, 0.856999999999999, 0.448599999999999, 1.2362, 0.953399999999988, 1.02859999999998, 0.563199999999995, 0.663000000000011, 0.723000000000013, 0.756599999999992, 0.256599999999992, -0.837600000000009, 0.620000000000005, 0.821599999999989, 0.216600000000028, 0.205600000000004, 0.220199999999977, 0.372599999999977, 0.334400000000016, 0.928400000000011, 0.972800000000007, 0.192400000000021, 0.487199999999973, -0.413000000000011, 0.807000000000016, 0.120600000000024, 0.769000000000005, 0.870799999999974, 0.66500000000002, 0.118200000000002, 0.401200000000017, 0.635199999999998, 0.135400000000004, 0.175599999999974, 1.16059999999999, 0.34620000000001, 0.521400000000028, -0.586599999999976, -1.16480000000001, 0.968399999999974, 0.836999999999989, 0.779600000000016, 0.985799999999983, ],
