@@ -1,0 +1,15 @@
+{
+	"name": "hll-d",
+	"authors": [
+		"Ilya Yaroshenko"
+	],
+	"description": "HyperLogLog++: Cardinality estimationn",
+	"copyright": "Copyright © 2017, Tamedia Digital",
+	"license": "BSL-1.0",
+	"dependencies": {
+		"mir-algorithm": "~>0.0.22",
+		"mir-math": "~>0.0.1",
+		"mir-random": "~>0.1.2",
+		"lincount": "~>0.0.3"
+	}
+}
