@@ -35,6 +35,7 @@ void puts(T...)(T args)
 Generic $(LINK2 https://research.google.com/pubs/pub40671.html, HyperLogLog++) implementation.
 Params:
     p = precision for normal representation, p ∈ [4..min(pPrime, 18)].
+        The implementation uses less or equal to `2 ^^ (p - 3) * 6` bytes of memory.
     pPrime = precision for sparse representation, pPrime ∈ [4..63].
 
 The structure is not copyable and has destructor.
