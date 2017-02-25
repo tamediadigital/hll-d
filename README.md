@@ -10,7 +10,7 @@ auto counter = auto hll = HLL(18);
   counter.put(anArrayOrString);
   // or
   //counter.put(anUlong);
-  //counter.put(anUUID); // for 64bit targets only
+  //counter.put(anUUID);
 
 ulong count = counter.count;
 
