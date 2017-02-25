@@ -1,5 +1,5 @@
 /++
-Generic $(LINK2 https://research.google.com/pubs/pub40671.html, HyperLogLog++) implementation.
+$(LINK2 https://research.google.com/pubs/pub40671.html, HyperLogLog++) implementation.
 
 Authors: Ilya Yaroshenko
 Copyright: Tamedia Digital
