@@ -25,10 +25,10 @@ extern(C) @system nothrow @nogc
     alias HLL_Realloc = void* function(void* ptr, size_t size);
     ///
     alias HLL_Free = void function(void* ptr);
-    ///
-    alias HLL_Hasher = ulong function(in void* ptr, size_t size);
 
     /++
+    Createa $(LREF HLL) instance.
+    The structure constructor can be used instead.
     +/
     pragma(inline, false)
     int dlang_hll_create(
@@ -38,7 +38,6 @@ extern(C) @system nothrow @nogc
         HLL_Malloc malloc = &core.stdc.stdlib.malloc,
         HLL_Realloc realloc = &core.stdc.stdlib.realloc,
         HLL_Free free = &core.stdc.stdlib.free,
-        //Hasher hash = &murmurHash3_x64_128
         )
     {
         if (!(4 <= p && p <= pPrime && p <= 18))
@@ -64,6 +63,8 @@ extern(C) @system nothrow @nogc
     }
 
     /++
+    Destroys $(LREF HLL) instance.
+    The structure destructor can be used instead.
     +/
     pragma(inline, false)
     void dlang_hll_destroy(ref HLL hll)
@@ -79,6 +80,7 @@ extern(C) @system nothrow @nogc
     }
 
     /++
+    Computes 64bit Murmurhash3 value.
     +/
     pragma(inline, false)
     ulong dlang_hll_murmurhash(ref HLL hll, const(void)* ptr, size_t size)
@@ -98,7 +100,7 @@ extern(C) @system nothrow @nogc
     }
 
     /++
-    Puts hash value to the counter.
+    Puts data or hash value to the counter.
     +/
     alias put = dlang_hll_put_hash;
     ///
@@ -195,7 +197,7 @@ extern(C) @system nothrow @nogc
     }
 
     /++
-    Returns: estimated cardinality number.
+    Returns estimated cardinality number.
     +/
     alias count = dlang_hll_count;
 
@@ -276,7 +278,6 @@ extern(C) @system nothrow @nogc
             if (temp.length == 0)
                 return;
             import mir.ndslice.sorting: sort;
-            //import std.algorithm;
             temp.sliced.sort!((a, b) => less(a, b));
             auto new_sparse_length = _sparse.length + temp.length * 10 + 10;
             auto new_sparse = malloc(new_sparse_length);
@@ -418,9 +419,9 @@ struct HLL
 
     extern(C) @system nothrow @nogc
     {
-        void* function(size_t size) malloc;
-        void* function(void* ptr, size_t size) realloc;
-        void  function(void* ptr) free;
+        HLL_Malloc malloc;
+        HLL_Realloc realloc;
+        HLL_Free free;
     }
 
     uint p; // = 18;
