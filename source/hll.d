@@ -114,7 +114,7 @@ extern(C) @system nothrow @nogc
     alias put = dlang_hll_put_uuid;
 
     ///ditto
-    void dlang_hll_put_uuid(ref HLL hll, UUID uuid)
+    void dlang_hll_put_uuid(ref HLL hll, ref UUID uuid)
     {
         auto ulongs = *cast(ulong[2]*)&uuid;
         enum ulong m = 0xc6a4a7935bd1e995UL;

@@ -44,7 +44,7 @@ void dlang_hll_put_hash(struct HLL *hll, uint64_t hash);
 /**
 Adds UUID to the counter.
 */
-void dlang_hll_put_uuid(struct HLL *hll, struct HLL_UUID uuid);
+void dlang_hll_put_uuid(struct HLL *hll, struct HLL_UUID *uuid);
 
 /**
 Returns estimated cardinality number.
