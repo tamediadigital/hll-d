@@ -5,7 +5,7 @@ Written in D to use in C and other languages.
 ```d
 import hll;
 // creates HLL++ counter with maximal allowed precision (18)
-auto counter = HLL(18); // 2 ^^ (18 - 3) * 6 / 1024 = 192 KB
+auto counter = HLL(18); // allocated size is less or equal to 2 ^^ (18 - 3) * 6 / 1024 = 192 KB
 
 /// loop
   counter.put(anArrayOrString);
