@@ -19,9 +19,15 @@ struct HLL_UUID
 
 /**
 Creates HLL instance.
+Params:
+	hll = hll reference
+	p = precision, p ∈ [4..min(pPrime, 18)]"
+	pPrime = precision for sparse representation, pPrime ∈ [4..63]
+	malloc = memory allocation function
+	realloc = memory reallocation function
+	free = memory free function
 
-constraint: p ∈ [4..min(pPrime, 18)]"
-constraint: pPrime ∈ [4..63]
+Returns: 0 on success and a positive value if parameters are wrong.
 */
 int dlang_hll_create(
     struct HLL *hll,

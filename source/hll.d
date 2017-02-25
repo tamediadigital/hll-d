@@ -27,8 +27,18 @@ extern(C) @system nothrow @nogc
     alias HLL_Free = void function(void* ptr);
 
     /++
-    Createa $(LREF HLL) instance.
+    Creates $(LREF HLL) instance.
     The structure constructor can be used instead.
+
+    Params:
+        hll = hll reference
+        p = precision, p ∈ [4..min(pPrime, 18)]"
+        pPrime = precision for sparse representation, pPrime ∈ [4..63]
+        malloc = memory allocation function
+        realloc = memory reallocation function
+        free = memory free function
+
+    Returns: 0 on success and a positive value if parameters are wrong.
     +/
     pragma(inline, false)
     int dlang_hll_create(
