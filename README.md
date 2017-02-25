@@ -19,7 +19,7 @@ ulong count = counter.count;
 
 ### Building the library with C API
 
-BetterC mode allows to use D libraries without DRuntome and Phobos.
+BetterC mode allows to use D libraries without DRuntime and Phobos.
 
 hll-d has C API. C/C++ headers can be found at the [include/](include/) directory.
 
