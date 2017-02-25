@@ -44,11 +44,18 @@ extern(C) @system nothrow @nogc
             return 1;
         if (!(pPrime <= 63))
             return 2;
+
         hll.p = p;
         hll.pPrime = pPrime;
         hll.malloc = malloc;
         hll.realloc = realloc;
         hll.free = free;
+        hll._normal = null;
+        hll._sparse = null;
+        hll._sparse_count = 0;
+        hll._temp = null;
+        hll._temp_length = 0;
+
         if (hll.pPrime)
         {
             hll._temp = (cast(ulong*)hll.malloc(24 * ulong.sizeof))[0 .. 24];
@@ -83,7 +90,7 @@ extern(C) @system nothrow @nogc
     Computes 64bit Murmurhash3 value.
     +/
     pragma(inline, false)
-    ulong dlang_hll_murmurhash(ref HLL hll, const(void)* ptr, size_t size)
+    ulong dlang_hll_murmurhash(const(void)* ptr, size_t size)
     {
         static if (__VERSION__ >= 2072)
             import std.digest.murmurhash;
@@ -136,9 +143,10 @@ extern(C) @system nothrow @nogc
 
     ///ditto
     pragma(inline, true)
+    extern(D)
     void put()(ref HLL hll, const(void)[] data)
     {
-        dlang_hll_put_hash(dlang_hll_murmurhash(data.ptr, data.length));
+        dlang_hll_put_hash(hll, dlang_hll_murmurhash(data.ptr, data.length));
     }
 
     ///ditto
@@ -396,10 +404,6 @@ private size_t bs_lower_bound()(in double[] a, double x) {
     }
     return l;
 }
-
-import core.demangle;
-pragma(msg, demangle("_D3hll3HLL11__xopEqualsFKxS3hll3HLLKxS3hll3HLLZb"));
-pragma(msg, demangle("_D3hll3HLL11__xopEqualsMFKxS3hll3HLLKxS3hll3HLLZb"));
 
 /++
 Generic $(LINK2 https://research.google.com/pubs/pub40671.html, HyperLogLog++) implementation.
