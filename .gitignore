@@ -14,3 +14,9 @@ hll-d-test-library
 *.sublime-project
 
 *.a
+
+__.SYMDEF SORTED
+
+hll-d-test-default
+
+*.s
