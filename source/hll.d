@@ -7,22 +7,12 @@ License:  Boost Software License version 1.0
 +/
 module hll;
 
+import std.uuid;
 import std.traits;
 import mir.ndslice.slice;
 import mir.ndslice.field: BitpackField;
 import mir.ndslice.iterator: FieldIterator;
 static import core.stdc.stdlib;
-
-static if (__VERSION__ >= 2072)
-{
-    import std.digest.digest: digest;
-    import std.digest.murmurhash: MurmurHash3;
-    alias MurmurHash3_x64_128 = MurmurHash3!(128, 64);
-}
-else
-{
-    import lincount.murmurhash;
-}
 
 private version(unittest)
 void puts(T...)(T args)
@@ -30,6 +20,364 @@ void puts(T...)(T args)
     import std.stdio;
     writeln(args);
     stdout.flush;
+}
+
+extern(C) @system nothrow @nogc
+{
+    ///
+    alias HLL_Malloc = void* function(size_t size);
+    ///
+    alias HLL_Realloc = void* function(void* ptr, size_t size);
+    ///
+    alias HLL_Free = void function(void* ptr);
+    ///
+    alias HLL_Hasher = ulong function(in void* ptr, size_t size);
+
+    pragma(inline, false)
+    void dlang_hll_create(
+        ref HLL hll,
+        uint p,
+        uint pPrime = 25, 
+        HLL_Malloc malloc = &core.stdc.stdlib.malloc,
+        HLL_Realloc realloc = &core.stdc.stdlib.realloc,
+        HLL_Free free = &core.stdc.stdlib.free,
+        //Hasher hash = &murmurHash3_x64_128
+        )
+    {
+        assert(4 <= p && p <= pPrime && p <= 18, "constraint: p ∈ [4..min(pPrime, 18)]");
+        assert(pPrime <= 63, "constraint: pPrime ∈ [4..63]");
+        hll.p = p;
+        hll.pPrime = pPrime;
+        hll.malloc = malloc;
+        hll.realloc = realloc;
+        hll.free = free;
+        if (hll.pPrime)
+        {
+            hll._temp = (cast(ulong*)hll.malloc(24 * ulong.sizeof))[0 .. 24];
+        }
+        else
+        {
+            hll._normal = cast(ulong*)malloc(normal_allocation_size(hll.p));
+            foreach(ref e; hll._normal[0 .. normal_length(hll.p)])
+                e = 0;
+        }
+    }
+
+    pragma(inline, false)
+    void dlang_hll_destroy(ref HLL hll)
+    {
+        with(hll)
+        {
+            deallocateSparse();
+            if (_normal)
+            {
+                free(_normal);
+            }
+        }
+    }
+
+    pragma(inline, false)
+    ulong dlang_hll_murmurhash(ref HLL hll, const(void)* ptr, size_t size)
+    {
+        static if (__VERSION__ >= 2072)
+            import std.digest.murmurhash;
+        else
+            import murmurhash;
+        version (D_LP64)
+            alias Hasher = MurmurHash3!(128, 64);
+        else
+            alias Hasher = MurmurHash3!(128, 32);
+        Hasher d;
+        d.put(cast(ubyte[])ptr[0 .. size]);
+        auto hashed = cast(ulong[2])d.finish;
+        return hashed[0] ^ hashed[1];
+    }
+
+    /++
+    Puts hash value to the counter.
+    +/
+    alias put = dlang_hll_put_hash;
+    ///
+    alias put = dlang_hll_put_uuid;
+
+    ///ditto
+    void dlang_hll_put_uuid(ref HLL hll, UUID uuid)
+    {
+        auto ulongs = *cast(ulong[2]*)&uuid;
+        enum ulong m = 0xc6a4a7935bd1e995UL;
+        enum ulong n = m * 16;
+        enum uint r = 47;
+
+        ulong h = n;
+
+        ulong k = ulongs[0];
+        k *= m;
+        k ^= k >> r;
+        k *= m;
+
+        h ^= k;
+        h *= m;
+
+        k = ulongs[1];
+        k *= m;
+        k ^= k >> r;
+        k *= m;
+
+        h ^= k;
+        h *= m;
+        dlang_hll_put_hash(hll, h);
+    }
+
+    ///ditto
+    pragma(inline, true)
+    void put()(ref HLL hll, const(void)[] data)
+    {
+        dlang_hll_put_hash(dlang_hll_murmurhash(data.ptr, data.length));
+    }
+
+    ///ditto
+    pragma(inline, false)
+    void dlang_hll_put_hash(ref HLL hll, ulong hash)
+    {
+        with(hll)
+        {
+            if (_temp) //temp is always allocated for sparse representation
+            {
+                putTemp(encodeHash(hash));
+                if (temp.length >= normal_length(p) / 4)
+                {
+                    static uint i;
+                    dlang_hll_unite_temp(hll);
+                    assert(_sparse.length);
+                    if ((cast(void[])_sparse).length + (cast(void[])_temp).length >= normal_allocation_size(p))
+                    {
+                        import mir.ndslice.topology: bitpack;
+                        auto from = inputSparse;
+                        auto ret = cast(ulong*)malloc(normal_allocation_size(p));
+                        foreach(ref e; ret[0 .. normal_length(p)])
+                            e = 0;
+                        auto bp = ret[0 .. normal_length(p)].sliced.bitpack!6;
+                        assert(bp.length == m(p));
+                        while(!from.empty)
+                        {
+                            auto e = from.front;
+                            ulong r;
+                            ulong idx = decodeHash(e, r);
+                            idx >>= pPrime - p;
+                            assert(idx < bp.length);
+                            if (r > bp[idx])
+                                bp[idx] = r;
+                            from.popFront;
+                        }
+                        _normal = ret;
+                        deallocateSparse;
+                    }
+                }
+                return;
+            }
+            // normal representation
+            auto bp = normal;
+            auto shift = 64 - p;
+            size_t idx = cast(size_t) (hash >> shift);
+            assert(idx < bp.length);
+            ulong r = rho(hash);
+            ulong r1;
+            auto idx1 = decodeHash(encodeHash(hash), r1);
+            idx1 >>= pPrime - p;
+            assert(idx1 == idx);
+            assert(r1 == r);
+            if (r > bp[idx])
+                bp[idx] = r;
+        }
+    }
+
+    /++
+    Returns: estimated cardinality number.
+    +/
+    alias count = dlang_hll_count;
+
+    ///ditto
+    pragma(inline, false)
+    ulong dlang_hll_count(ref HLL hll)
+    {
+        with(hll)
+        {
+            if (_temp)
+            {
+                dlang_hll_unite_temp(hll);
+                return cast(ulong) linearCounting(m(pPrime), m(pPrime) - _sparse_count);
+            }
+            import mir.math.internal: pow;
+            ulong overflows;
+            ulong value;
+            size_t v;
+            foreach(e; normal)
+            {
+                if (e == 0)
+                    v++;
+                assert(e <= 63);
+                e = ulong(1) << (63 - e);
+                if (e > ulong.max - value)
+                    overflows++;
+                value += e;
+            }
+            double alpha = void;
+            switch(p)
+            {
+                case 4:
+                    alpha = 0.673;
+                    break;
+                case 5:
+                    alpha =  0.697;
+                    break;
+                case 6:
+                    alpha = 0.709;
+                    break;
+                default:
+                    alpha = 0.7213 / (1 + 1.079 / m(p));
+                    break;
+            }
+            double e = alpha * pow(2.0, 2 * int(p) + 63) / (overflows * pow(2.0, 64) + value);
+
+            immutable double[] raw = _rawEstimateData[p - 4];
+            immutable double[] data = _biasData[p - 4];
+            import std.range;
+            auto t = raw.assumeSorted.trisect(e);
+            double bias = void;
+            if (t[1].length)
+                bias = data[t[0].length];
+            else
+            if (t[0].length == 0)
+                bias = data[0];
+            else
+            if (t[2].length == 0)
+                bias = data[$-1];
+            else
+            {
+                auto index = t[0].length;
+                auto w1 = raw[index] - e;
+                auto w2 = e - raw[index-1];
+                bias = (data[index] * w1 + data[index-1] * w2) / (w1 + w2);
+            }
+
+            double ePrime = e <= 5 * m(p) ? e - bias : e;
+            double h = v ? linearCounting(m(p), v) : ePrime;
+            return cast(ulong)(h <= _threshold[p - 4] ? h : ePrime);
+        }
+    }
+
+    void dlang_hll_unite_temp(ref HLL hll)
+    {
+        with(hll)
+        {
+            if (temp.length == 0)
+                return;
+            import mir.ndslice.sorting: sort;
+            //import std.algorithm;
+            temp.sliced.sort!((a, b) => less(a, b));
+            auto new_sparse_length = _sparse.length + temp.length * 10 + 10;
+            auto new_sparse = malloc(new_sparse_length);
+
+            auto o = OutputSparse(cast(ubyte*)new_sparse, new_sparse_length, 0, 0, 0);
+            if (_sparse.length)
+            {
+                auto i1 = inputSparse;
+                auto i2 = temp.sliced;
+                if (!i1.empty && !i1.empty)
+                for(;;)
+                {
+                    ulong f1 = i1.front;
+                    ulong f2 = i2.front;
+                    ulong r1; 
+                    ulong r2;
+                    ulong d1 = decodeHash(f1, r1);
+                    ulong d2 = decodeHash(f2, r2);
+                    if (d1 < d2)
+                    {
+                        o.put(f1);
+                        i1.popFront;
+                        if(i1.empty)
+                            break;
+                    }
+                    else
+                    {
+                        i2.popFront;
+                        while(!i2.empty)
+                        {
+                            ulong f3 = i2.front;
+                            ulong r3;
+                            ulong d3 = decodeHash(f3, r3);
+                            if (d3 != d2)
+                            {
+                                assert(d3 > d2);
+                                break;
+                            }
+                            assert(r3 >= r2);
+                            r2 = r3;
+                            f2 = f3;
+                            i2.popFront;
+                        }
+                        if (d1 > d2)
+                        {
+                            o.put(f2);
+                            //i2.popFront;
+                            if(i2.empty)
+                                break;
+                        }
+                        else
+                        {
+                            o.put(r1 > r2 ? f1 : f2);
+                            i1.popFront;
+                            //i2.popFront;
+                            if(i1.empty || i2.empty)
+                                break;
+                        }
+                    }
+                }
+                foreach (e; i1)
+                    o.put(e);
+                if (!i2.empty)
+                {
+                    ulong r2;
+                    ulong f2 = i2.front;
+                    ulong d2 = decodeHash(f2, r2);
+                    i2.popFront;
+                    while(!i2.empty)
+                    {
+                        ulong f3 = i2.front;
+                        ulong r3;
+                        ulong d3 = decodeHash(f3, r2);
+                        if (d3 != d2)
+                        {
+                            assert(d3 > d2);
+                            break;
+                        }
+                        assert(r3 >= r2);
+                        r2 = r3;
+                        f2 = f3;
+                        i2.popFront;
+                    }
+                    o.put(f2);
+                }
+
+            }
+            else
+            {
+                foreach(e; temp)
+                    o.put(e);
+            }
+            assert(o.length);
+            auto r = realloc(new_sparse, o.length);
+            assert(r);
+            if (_sparse.length)
+                free(_sparse.ptr);
+            _sparse = cast(ubyte[])r[0 .. o.length];
+            assert(_sparse.length);
+            _sparse_count = o.count;
+            _temp_length = 0;
+
+        }
+    }
 }
 
 /++
@@ -43,12 +391,6 @@ The structure is not copyable and has destructor.
 +/
 struct HLL
 {
-    invariant
-    {
-        assert(4 <= p && p <= pPrime && p <= 18, "constraint: p ∈ [4..min(pPrime, 18)]");
-        assert(pPrime <= 63, "constraint: pPrime ∈ [4..63]");
-    }
-
     ///
     @disable this();
     ///
@@ -61,7 +403,7 @@ struct HLL
         void  function(void* ptr) free;
     }
 
-    uint p;// = 18;
+    uint p; // = 18;
     uint pPrime; // = 25;
 
     private ulong* _normal;
@@ -70,12 +412,33 @@ struct HLL
     private ulong[] _temp;
     size_t _temp_length;
 
-    ulong[] temp()
+pragma(inline, true):
+
+    ///
+    this(uint p,
+        uint pPrime = 25, 
+        typeof(this.malloc) malloc = &core.stdc.stdlib.malloc,
+        typeof(this.realloc) realloc = &core.stdc.stdlib.realloc,
+        typeof(this.free) free = &core.stdc.stdlib.free,
+        )
+    {
+        dlang_hll_create(this, p, pPrime, malloc, realloc, free);
+    }
+
+    ///
+    ~this()
+    {
+        dlang_hll_destroy(this);
+    }
+
+    private:
+
+    ulong[] temp()()
     {
         return _temp[0 .. _temp_length];
     }
 
-    private void putTemp(ulong x)
+    private void putTemp()(ulong x)
     {
         assert(_temp_length <= _temp.length);
         if (_temp_length == _temp.length)
@@ -89,39 +452,7 @@ struct HLL
         _temp[_temp_length++] = x;
     }
 
-    void uniteTemp()
-    {
-        if (temp.length == 0)
-            return;
-        //import mir.ndslice.sorting: sort;
-        import std.algorithm;
-        temp.sort!((a, b) => cmp(a, b) < 0);
-        auto new_sparse_length = _sparse.length + temp.length * 10 + 10;
-        auto new_sparse = malloc(new_sparse_length);
-
-        auto o = OutputSparse(cast(ubyte*)new_sparse, new_sparse_length, 0, 0, 0);
-        if (_sparse.length)
-        {
-            merge(inputSparse, temp.sliced, o);
-        }
-        else
-        {
-            foreach(e; temp)
-                o.put(e);
-        }
-        assert(o.length);
-
-        auto r = realloc(new_sparse, o.length);
-        assert(r);
-        if (_sparse.length)
-            free(_sparse.ptr);
-        _sparse = cast(ubyte[])r[0 .. o.length];
-        assert(_sparse.length);
-        _sparse_count = o.count;
-        _temp_length = 0;
-    }
-
-    void deallocateSparse()
+    void deallocateSparse()()
     {
         if (_temp.ptr)
         {
@@ -135,270 +466,32 @@ struct HLL
         }
     }
 
-    InputSparse inputSparse()
+    InputSparse inputSparse()()
     {
         if (_sparse.ptr)
             return InputSparse(_sparse.ptr, _sparse_count);
         return InputSparse(null, 0);
     }
 
-    private auto normal()
+    auto normal()()
     {
         import mir.ndslice.topology: bitpack;
         return _normal[0 .. normal_length(p)].sliced.bitpack!6;
     }
-
-    ///
-    this(uint p,
-        uint pPrime = 25, 
-        typeof(this.malloc) malloc = &core.stdc.stdlib.malloc,
-        typeof(this.realloc) realloc = &core.stdc.stdlib.realloc,
-        typeof(this.free) free = &core.stdc.stdlib.free,
-        )
+    pragma(inline)
+    bool less()(ulong a, ulong b)
     {
-        this.p = p;
-        this.pPrime = pPrime;
-        this.malloc = malloc;
-        this.realloc = realloc;
-        this.free = free;
-        if (this.pPrime)
-        {
-            _temp = (cast(ulong*)this.malloc(24 * ulong.sizeof))[0 .. 24];
-        }
-        else
-        {
-            _normal = cast(ulong*)malloc(normal_allocation_size(this.p));
-            foreach(ref e; _normal[0 .. normal_length(this.p)])
-                e = 0;
-        }
-    }
-
-    ///
-    ~this()
-    {
-        deallocateSparse();
-        if (_normal)
-        {
-            free(_normal);
-        }
-    }
-
-    /++
-    Puts hash value to the counter.
-    +/
-    void put(ulong x)
-    {
-        if (_temp) //temp is always allocated for sparse representation
-        {
-                putTemp(encodeHash(x));
-                ulong r;
-                ulong idx = decodeHash(encodeHash(x), r);
-            if (temp.length >= normal_length(p) / 4)
-            {
-                static uint i;
-                uniteTemp;
-                assert(_sparse.length);
-                if ((cast(void[])_sparse).length + (cast(void[])_temp).length >= normal_allocation_size(p))
-                {
-                    _normal = toNormal(inputSparse);
-                    deallocateSparse;
-                }
-            }
-            return;
-        }
-        // normal representation
-        auto bp = normal;
-        auto shift = 64 - p;
-        size_t idx = cast(size_t) (x >> shift);
-        assert(idx < bp.length);
-        ulong r = rho(x);
+        version(LDC) pragma(inline, true);
         ulong r1;
-        auto idx1 = decodeHash(encodeHash(x), r1);
-        idx1 >>= pPrime - p;
-        assert(idx1 == idx);
-        assert(r1 == r);
-        if (r > bp[idx])
-            bp[idx] = r;
-    }
-
-    import std.uuid;
-
-    /++
-    Puts uuid's hash value to the counter.
-    Note: for 64bit targets only.
-    +/
-    void put(UUID uuid)
-    {
-        put(uuid.toHash);
-    }
-
-    /++
-    Puts data's hash value to the counter.
-    +/
-    void put(Hasher = MurmurHash3_x64_128)(in void[] data)
-        if (Hasher.init.finalize.length == 8 || Hasher.init.finalize.length == 16)
-    {
-        Hasher d;
-        d.put(data);
-        static if (d.finalize.length == 8)
-        {
-            put(d.finalize);
-        }
-        else
-        {
-            auto hashed = cast(ulong[2])d.finalize;
-            put(hashed[0] ^ hashed[1]);
-        }
-    }
-
-    /++
-    Returns: estimated cardinality number.
-    +/
-    ulong count()
-    {
-        if (_temp)
-        {
-            uniteTemp;
-            return cast(ulong) linearCounting(m(pPrime), m(pPrime) - _sparse_count);
-        }
-        import mir.math.internal: pow;
-        ulong overflows;
-        ulong value;
-        size_t v;
-        foreach(e; normal)
-        {
-            if (e == 0)
-                v++;
-            assert(e <= 63);
-            e = ulong(1) << (63 - e);
-            if (e > ulong.max - value)
-                overflows++;
-            value += e;
-        }
-        double e = alpha * pow(2.0, 2 * int(p) + 63) / (overflows * pow(2.0, 64) + value);
-        double ePrime = e <= 5 * m(p) ? e - estimateBias(e) : e;
-        double h = v ? linearCounting(m(p), v) : ePrime;
-        return cast(ulong)(h <= threshold ? h : ePrime);
-    }
-
-
-    private:
-
-
-    ulong* toNormal(InputSparse from)
-    {
-        import mir.ndslice.topology: bitpack;
-        auto ret = cast(ulong*)malloc(normal_allocation_size(p));
-        foreach(ref e; ret[0 .. normal_length(p)])
-            e = 0;
-        auto bp = ret[0 .. normal_length(p)].sliced.bitpack!6;
-        assert(bp.length == m(p));
-        while(!from.empty)
-        {
-            auto e = from.front;
-            ulong r;
-            ulong idx = decodeHash(e, r);
-            idx >>= pPrime - p;
-            assert(idx < bp.length);
-            if (r > bp[idx])
-                bp[idx] = r;
-            from.popFront;
-        }
-        return ret;
-    }
-
-    long cmp(ulong a, ulong b)
-    {
-        ulong r1; 
         ulong r2;
         ulong d1 = decodeHash(a, r1);
         ulong d2 = decodeHash(b, r2);
         if(long d = d1 - d2)
-            return d;
-        return r1 - r2;
+            return d < 0;
+        return long(r1 - r2) < 0;
     }
 
-    void merge(I1, I2, O)(I1 i1, I2 i2, ref O o)
-    {
-        if (!i1.empty && !i1.empty)
-        for(;;)
-        {
-            ulong f1 = i1.front;
-            ulong f2 = i2.front;
-            ulong r1; 
-            ulong r2;
-            ulong d1 = decodeHash(f1, r1);
-            ulong d2 = decodeHash(f2, r2);
-            if (d1 < d2)
-            {
-                o.put(f1);
-                i1.popFront;
-                if(i1.empty)
-                    break;
-            }
-            else
-            {
-                i2.popFront;
-                while(!i2.empty)
-                {
-                    ulong f3 = i2.front;
-                    ulong r3;
-                    ulong d3 = decodeHash(f3, r3);
-                    if (d3 != d2)
-                    {
-                        assert(d3 > d2);
-                        break;
-                    }
-                    assert(r3 >= r2);
-                    r2 = r3;
-                    f2 = f3;
-                    i2.popFront;
-                }
-                if (d1 > d2)
-                {
-                    o.put(f2);
-                    //i2.popFront;
-                    if(i2.empty)
-                        break;
-                }
-                else
-                {
-                    o.put(r1 > r2 ? f1 : f2);
-                    i1.popFront;
-                    //i2.popFront;
-                    if(i1.empty || i2.empty)
-                        break;
-                }
-            }
-        }
-        foreach (e; i1)
-            o.put(e);
-        if (!i2.empty)
-        {
-            ulong r2;
-            ulong f2 = i2.front;
-            ulong d2 = decodeHash(f2, r2);
-            i2.popFront;
-            while(!i2.empty)
-            {
-                ulong f3 = i2.front;
-                ulong r3;
-                ulong d3 = decodeHash(f3, r2);
-                if (d3 != d2)
-                {
-                    assert(d3 > d2);
-                    break;
-                }
-                assert(r3 >= r2);
-                r2 = r3;
-                f2 = f3;
-                i2.popFront;
-            }
-            o.put(f2);
-        }
-    }
-
-    ulong rho(ulong x)
+    ulong rho()(ulong x)
     {
         x <<= p;
         x ^= 1UL << (p - 1);
@@ -417,7 +510,7 @@ struct HLL
         return x;
     }
 
-    ulong encodeHash(ulong x)
+    ulong encodeHash()(ulong x)
     {
         ulong a = x >> (64 - pPrime);
         auto r = rho(x);
@@ -426,11 +519,10 @@ struct HLL
         return (r <= pPrime - p) ? a : ((a << 6) | (r << 1) | 1);
     }
 
-    ulong decodeHash(ulong k, ref ulong r)
+    ulong decodeHash()(ulong k, ref ulong r)
     {
         auto c = k & 1;
         k >>= 1;
-        //mask = m(pPrime) - 1;
         if (c == 0)
         {
             r = rho(k << (64 - pPrime));
@@ -442,49 +534,8 @@ struct HLL
             assert(r < 64);
             k >>= 6;
         }
-        //k >>= pPrime - p;
-        //k &= mask;
         assert(k < m(pPrime));
         return k;
-    }
-
-    // for p-4
-    auto threshold()
-    {
-        return _threshold[p - 4];
-    }
-
-    double estimateBias(double e)
-    {
-        immutable double[] raw = _rawEstimateData[p - 4];
-        immutable double[] data = _biasData[p - 4];
-        import std.range;
-        auto t = raw.assumeSorted.trisect(e);
-        if (t[1].length)
-            return data[t[0].length];
-        if (t[0].length == 0)
-            return data[0];
-        if (t[2].length == 0)
-            return data[$-1];
-        auto index = t[0].length;
-        auto w1 = raw[index] - e;
-        auto w2 = e - raw[index-1];
-        return (data[index] * w1 + data[index-1] * w2) / (w1 + w2);
-    }
-
-    double alpha()
-    {
-        switch(p)
-        {
-            case 4:
-                return 0.673;
-            case 5:
-                return  0.697;
-            case 6:
-                return 0.709;
-            default:
-                return 0.7213 / (1 + 1.079 / m(p));
-        }
     }
 }
 
@@ -503,7 +554,8 @@ unittest
 }
 
 
-auto linearCounting(ulong m, ulong v)
+pragma(inline, true)
+auto linearCounting()(ulong m, ulong v)
 {
     import mir.math.internal: log;
     return m * log (double(m) / v);
@@ -515,19 +567,21 @@ struct InputSparse
     size_t length;
     ulong front;
 
-    this(const(ubyte)* data, size_t length)
+pragma(inline, true):
+
+    this()(const(ubyte)* data, size_t length)
     {
         this.data = data;
         this.length = length;
         this.front = length ? fromVarint(this.data) : 0;
     }
 
-    bool empty() @property
+    bool empty()() @property
     {
         return length == 0;
     }
 
-    void popFront()
+    void popFront()()
     {
         if (length--)
         {
@@ -544,7 +598,8 @@ struct OutputSparse
     size_t length;
     ulong lastValue;
 
-    void put(ulong value)
+    pragma(inline, true)
+    void put()(ulong value)
     {
         assert(max_length > length + 9);
         ulong diff = value - lastValue;
@@ -566,7 +621,7 @@ unittest
         e = rng.rand!ulong;
     auto d = new ubyte[ar.length * 10];
     import std.algorithm;
-    import std.range;
+    import std.range: put;
     auto o = OutputSparse(d.ptr, d.length);
     put(o, ar);
     assert(o.count == ar.length);
@@ -574,8 +629,9 @@ unittest
     assert(InputSparse(d.ptr, o.count).equal(ar));
 }
 
-ulong fromVaruint(ref const(ubyte)* d)
+ulong fromVaruint()(ref const(ubyte)* d)
 {
+    version(LDC) pragma(inline, true);
     auto data = d;
     ulong ret;
     size_t offset;
@@ -592,7 +648,8 @@ ulong fromVaruint(ref const(ubyte)* d)
     return ret;
 }
 
-long fromVarint(ref const(ubyte)* d)
+pragma(inline, true)
+long fromVarint()(ref const(ubyte)* d)
 {
     auto ux = fromVaruint(d);
     auto x = ux >> 1;
@@ -601,7 +658,8 @@ long fromVarint(ref const(ubyte)* d)
     return x;
 }
 
-size_t varintLength(ulong n)
+pragma(inline, true)
+size_t varintLength()(ulong n)
 {
     if (n <= 127)
         return 1;
@@ -615,7 +673,8 @@ size_t varintLength(ulong n)
     }
 }
 
-void toVaruint(ref ubyte* d, ulong n)
+pragma(inline, true)
+void toVaruint()(ref ubyte* d, ulong n)
 {
     auto data = d;
     while (n > byte.max)
@@ -627,7 +686,8 @@ void toVaruint(ref ubyte* d, ulong n)
     d = data;
 }
 
-void toVarint(ref ubyte* d, long n)
+pragma(inline, true)
+void toVarint()(ref ubyte* d, long n)
 {
     toVaruint(d, (n << 1) ^ (n >> 63));
 }
@@ -658,11 +718,14 @@ unittest
     assert(p == variant.ptr + 2);
 }
 
-size_t m(uint p) { return size_t(1) << p; }
-size_t normal_bit_size(uint p) { return m(p) * 6; }
-size_t normal_size(uint p) { return normal_bit_size(p) / 8; }
-size_t normal_length(uint p) { return normal_size(p) / ulong.sizeof + (normal_size(p) % ulong.sizeof != 0); }
-size_t normal_allocation_size(uint p) { return normal_length(p) * ulong.sizeof; }
+pragma(inline, true)
+{
+    size_t m()(uint p) { return size_t(1) << p; }
+    size_t normal_bit_size()(uint p) { return m(p) * 6; }
+    size_t normal_size()(uint p) { return normal_bit_size(p) / 8; }
+    size_t normal_length()(uint p) { return normal_size(p) / ulong.sizeof + (normal_size(p) % ulong.sizeof != 0); }
+    size_t normal_allocation_size()(uint p) { return normal_length(p) * ulong.sizeof; }
+}
 
 immutable _threshold = [10, 20, 40, 80, 220, 400, 900, 1800, 3100, 6500, 11500, 20000, 50000, 120000, 350000];
 
