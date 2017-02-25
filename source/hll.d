@@ -13,8 +13,6 @@ pragma(LDC_no_moduleinfo);
 import std.uuid;
 import std.traits;
 import mir.ndslice.slice;
-import mir.ndslice.field: BitpackField;
-import mir.ndslice.iterator: FieldIterator;
 static import core.stdc.stdlib;
 
 extern(C) @system nothrow @nogc
