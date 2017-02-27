@@ -223,9 +223,11 @@ extern(C) @system nothrow @nogc
     {
         with(hll)
         {
-            if (_temp)
+            if (_temp.length)
             {
                 dlang_hll_unite_temp(hll);
+                import core.stdc.stdio;
+                foreach(e; inputSparse)
                 return cast(ulong) linearCounting(m(pPrime), m(pPrime) - _sparse_count);
             }
             import mir.math.internal: pow;
@@ -299,74 +301,35 @@ extern(C) @system nothrow @nogc
             auto new_sparse = malloc(new_sparse_length);
 
             auto o = OutputSparse(cast(ubyte*)new_sparse, new_sparse_length, 0, 0, 0);
-            if (_sparse.length)
+                import core.stdc.stdio;
+
+            auto i1 = inputSparse;
+            auto i2 = temp.sliced;
+            if (!i1.empty && !i1.empty)
+            for(;;)
             {
-                auto i1 = inputSparse;
-                auto i2 = temp.sliced;
-                if (!i1.empty && !i1.empty)
-                for(;;)
+                ulong f1 = i1.front;
+                ulong f2 = i2.front;
+                ulong r1; 
+                ulong r2;
+                ulong d1 = decodeHash(f1, r1);
+                ulong d2 = decodeHash(f2, r2);
+                if (d1 < d2)
                 {
-                    ulong f1 = i1.front;
-                    ulong f2 = i2.front;
-                    ulong r1; 
-                    ulong r2;
-                    ulong d1 = decodeHash(f1, r1);
-                    ulong d2 = decodeHash(f2, r2);
-                    if (d1 < d2)
-                    {
-                        o.put(f1);
-                        i1.popFront;
-                        if(i1.empty)
-                            break;
-                    }
-                    else
-                    {
-                        i2.popFront;
-                        while(!i2.empty)
-                        {
-                            ulong f3 = i2.front;
-                            ulong r3;
-                            ulong d3 = decodeHash(f3, r3);
-                            if (d3 != d2)
-                            {
-                                assert(d3 > d2);
-                                break;
-                            }
-                            assert(r3 >= r2);
-                            r2 = r3;
-                            f2 = f3;
-                            i2.popFront;
-                        }
-                        if (d1 > d2)
-                        {
-                            o.put(f2);
-                            //i2.popFront;
-                            if(i2.empty)
-                                break;
-                        }
-                        else
-                        {
-                            o.put(r1 > r2 ? f1 : f2);
-                            i1.popFront;
-                            //i2.popFront;
-                            if(i1.empty || i2.empty)
-                                break;
-                        }
-                    }
+                    o.put(f1);
+                    i1.popFront;
+                    if(i1.empty)
+                        break;
+
                 }
-                foreach (e; i1)
-                    o.put(e);
-                if (!i2.empty)
+                else
                 {
-                    ulong r2;
-                    ulong f2 = i2.front;
-                    ulong d2 = decodeHash(f2, r2);
                     i2.popFront;
                     while(!i2.empty)
                     {
                         ulong f3 = i2.front;
                         ulong r3;
-                        ulong d3 = decodeHash(f3, r2);
+                        ulong d3 = decodeHash(f3, r3);
                         if (d3 != d2)
                         {
                             assert(d3 > d2);
@@ -377,15 +340,49 @@ extern(C) @system nothrow @nogc
                         f2 = f3;
                         i2.popFront;
                     }
-                    o.put(f2);
+                    if (d1 > d2)
+                    {
+                        o.put(f2);
+                        if(i2.empty)
+                            break;
+                    }
+                    else
+                    {
+                        o.put(r1 > r2 ? f1 : f2);
+                        i1.popFront;
+                        if(i1.empty || i2.empty)
+                            break;
+                    }
                 }
-
             }
-            else
+            foreach (e; i1)
             {
-                foreach(e; temp)
-                    o.put(e);
+                o.put(e);
             }
+            while (!i2.empty)
+            {
+                ulong r2;
+                ulong f2 = i2.front;
+                ulong d2 = decodeHash(f2, r2);
+                i2.popFront;
+                while(!i2.empty)
+                {
+                    ulong f3 = i2.front;
+                    ulong r3;
+                    ulong d3 = decodeHash(f3, r3);
+                    if (d3 != d2)
+                    {
+                        assert(d3 > d2);
+                        break;
+                    }
+                    assert(r3 >= r2);
+                    r2 = r3;
+                    f2 = f3;
+                    i2.popFront;
+                }
+                o.put(f2);
+            }
+
             assert(o.length);
             auto r = realloc(new_sparse, o.length);
             assert(r);
