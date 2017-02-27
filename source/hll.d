@@ -226,8 +226,6 @@ extern(C) @system nothrow @nogc
             if (_temp.length)
             {
                 dlang_hll_unite_temp(hll);
-                import core.stdc.stdio;
-                foreach(e; inputSparse)
                 return cast(ulong) linearCounting(m(pPrime), m(pPrime) - _sparse_count);
             }
             import mir.math.internal: pow;
@@ -301,7 +299,6 @@ extern(C) @system nothrow @nogc
             auto new_sparse = malloc(new_sparse_length);
 
             auto o = OutputSparse(cast(ubyte*)new_sparse, new_sparse_length, 0, 0, 0);
-                import core.stdc.stdio;
 
             auto i1 = inputSparse;
             auto i2 = temp.sliced;
