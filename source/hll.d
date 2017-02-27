@@ -317,7 +317,6 @@ extern(C) @system nothrow @nogc
                     i1.popFront;
                     if(i1.empty)
                         break;
-
                 }
                 else
                 {
