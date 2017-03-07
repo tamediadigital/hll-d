@@ -22,3 +22,5 @@ hll-d-test-default
 *.s
 
 *.out
+
+*.sublime-workspace
