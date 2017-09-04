@@ -100,10 +100,7 @@ extern(C) @system nothrow @nogc
     pragma(inline, false)
     ulong dlang_hll_murmurhash(const(void)* ptr, size_t size)
     {
-        static if (__VERSION__ >= 2072)
-            import std.digest.murmurhash;
-        else
-            import murmurhash;
+        import std.digest.murmurhash: MurmurHash3;
         version (D_LP64)
             alias Hasher = MurmurHash3!(128, 64);
         else
@@ -228,7 +225,7 @@ extern(C) @system nothrow @nogc
                 dlang_hll_unite_temp(hll);
                 return cast(ulong) linearCounting(m(pPrime), m(pPrime) - _sparse_count);
             }
-            import mir.math.internal: pow;
+            import mir.math.common: pow;
             ulong overflows;
             ulong value;
             size_t v;
@@ -258,7 +255,8 @@ extern(C) @system nothrow @nogc
                     alpha = 0.7213 / (1 + 1.079 / m(p));
                     break;
             }
-            double e = alpha * pow(2.0, 2 * int(p) + 63) / (overflows * pow(2.0, 64) + value);
+            enum double p2_64 = 2.0 ^^ 64;
+            double e = alpha * pow(2.0, 2 * int(p) + 63) / (overflows * p2_64 + value);
 
             immutable double[] raw = _rawEstimateData[p - 4];
             immutable double[] data = _biasData[p - 4];
@@ -597,7 +595,7 @@ unittest
 pragma(inline, true)
 auto linearCounting()(ulong m, ulong v)
 {
-    import mir.math.internal: log;
+    import mir.math.common: log;
     return m * log (double(m) / v);
 }
 
