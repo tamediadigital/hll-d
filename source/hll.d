@@ -106,8 +106,10 @@ extern(C) @system nothrow @nogc
         else
             alias Hasher = MurmurHash3!(128, 32);
         Hasher d;
-        d.put(cast(ubyte[])ptr[0 .. size]);
-        auto hashed = cast(ulong[2])d.finish;
+        d.put((cast(ubyte*)ptr)[0 .. size]);
+        static union U { ubyte[16] bytes; ulong[2] longs; }
+        U u = {bytes : d.finish};
+        auto hashed = u.longs;
         return hashed[0] ^ hashed[1];
     }
 
@@ -808,14 +810,6 @@ unittest
     foreach(e; _rawEstimateData)
         foreach(i, r; e[0 .. $-1])
             assert(r <= e[i + 1]);
-}
-
-
-extern(C) nothrow @nogc @system
-pragma(inline, false)
-size_t _d_array_cast_len(size_t len, size_t elemsz, size_t newelemsz)
-{
-    return len * elemsz / newelemsz;
 }
 
 private version(unittest)
